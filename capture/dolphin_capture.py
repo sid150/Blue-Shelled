@@ -4,6 +4,9 @@ import time
 import cv2
 import mss
 import numpy as np  
+import pywinctl as wctl #for linux/mac
+import subprocess
+#TODO: add support for windows with pygetwindow
 
 class FrameBuffer:
 
@@ -27,9 +30,33 @@ class DolphinCapture:
         self.frame_buffer = frame_buffer
         self.fps = fps
         self.running = False
+        self.bbox = None
+    
+    def set_bbox(self):
+        script = """
+        tell application "System Events"
+            tell process "Dolphin"
+                set w to window 1
+                set p to position of w
+                set s to size of w
+                return ((item 1 of p) as string) & "," & ((item 2 of p) as string) & "," & ((item 1 of s) as string) & "," & ((item 2 of s) as string)
+            end tell
+        end tell
+        """
+        print("Waiting for Dolphin window...")
+        while True:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                break
+            time.sleep(1)  # retry every second until window is ready
 
+        left, top, width, height = map(int, result.stdout.strip().split(","))
+        self.bbox = {"top": top, "left": left, "width": width, "height": height}
+        print(f"Dolphin bbox: {self.bbox}")
+    
     def start(self):
         self.running = True
+        self.set_bbox()  # add this line
         threading.Thread(target=self._capture_frames).start()
     
     def _capture_frames(self):
