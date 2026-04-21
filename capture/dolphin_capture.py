@@ -1,41 +1,88 @@
+from __future__ import annotations
+
 from collections import deque
+from dataclasses import dataclass
+import platform
+import subprocess
 import threading
 import time
+from typing import Any
+
 import cv2
 import mss
-import numpy as np  
-import pywinctl as wctl #for linux/mac
-import subprocess
-#TODO: add support for windows with pygetwindow
+import numpy as np
+
+
+@dataclass(slots=True)
+class CapturedFrame:
+    image: np.ndarray
+    captured_at: float
+
 
 class FrameBuffer:
+    def __init__(self, max_frames: int = 10) -> None:
+        self._buffer: deque[CapturedFrame] = deque(maxlen=max_frames)
+        self._lock = threading.Lock()
 
-    def __init__(self,maxFrames = 10):
-        #double ended queue stores 10 most recent frames for event
-        self.buffer = deque(maxlen = maxFrames)
-        self.lock = threading.Lock() 
+    def add(self, frame: CapturedFrame) -> None:
+        with self._lock:
+            self._buffer.append(frame)
 
-    def add_to_buffer(self,frame):
-        with self.lock:
-            self.buffer.append(frame)
+    def latest(self) -> CapturedFrame | None:
+        with self._lock:
+            return self._buffer[-1] if self._buffer else None
 
-    def get_latest_from_buffer(self):
-        with self.lock:
-            return self.buffer[-1] if self.buffer else None
 
 class DolphinCapture:
-
-    def __init__(self,frame_buffer: FrameBuffer, monitor: int = 1, fps: int = 2):
-        self.monitor = monitor
+    def __init__(
+        self,
+        frame_buffer: FrameBuffer,
+        fps: int = 2,
+        window_title: str = "Dolphin",
+        frame_scale: float = 1.0,
+    ) -> None:
         self.frame_buffer = frame_buffer
         self.fps = fps
+        self.window_title = window_title
+        self.frame_scale = frame_scale
         self.running = False
-        self.bbox = None
-    
-    def set_bbox(self):
-        script = """
+        self._capture_thread: threading.Thread | None = None
+        self._bbox: dict[str, int] | None = None
+
+    def start(self) -> None:
+        self.running = True
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._capture_thread.start()
+
+    def stop(self) -> None:
+        self.running = False
+        if self._capture_thread:
+            self._capture_thread.join(timeout=1.5)
+
+    def _capture_loop(self) -> None:
+        interval = max(0.05, 1 / max(1, self.fps))
+        with mss.mss() as sct:
+            while self.running:
+                bbox = self._resolve_bbox(sct)
+                img = sct.grab(bbox)
+                frame = cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
+                if self.frame_scale != 1.0:
+                    frame = cv2.resize(frame, (0, 0), fx=self.frame_scale, fy=self.frame_scale)
+                self.frame_buffer.add(CapturedFrame(image=frame, captured_at=time.time()))
+                time.sleep(interval)
+
+    def _resolve_bbox(self, sct: mss.base.MSSBase) -> dict[str, Any]:
+        system = platform.system().lower()
+        if system == "darwin":
+            self._bbox = self._bbox or self._macos_bbox()
+            if self._bbox:
+                return self._bbox
+        return sct.monitors[1]
+
+    def _macos_bbox(self) -> dict[str, int] | None:
+        script = f"""
         tell application "System Events"
-            tell process "Dolphin"
+            tell process "{self.window_title}"
                 set w to window 1
                 set p to position of w
                 set s to size of w
@@ -43,32 +90,8 @@ class DolphinCapture:
             end tell
         end tell
         """
-        print("Waiting for Dolphin window...")
-        while True:
-            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                break
-            time.sleep(1)  # retry every second until window is ready
-
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
         left, top, width, height = map(int, result.stdout.strip().split(","))
-        self.bbox = {"top": top, "left": left, "width": width, "height": height}
-        print(f"Dolphin bbox: {self.bbox}")
-    
-    def start(self):
-        self.running = True
-        self.set_bbox()  # add this line
-        threading.Thread(target=self._capture_frames).start()
-    
-    def _capture_frames(self):
-        with mss.mss() as sct:
-            monitor = sct.monitors[self.monitor]
-            while self.running:
-                img = sct.grab(monitor)
-                frame = cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
-                self.frame_buffer.add_to_buffer(frame)
-                time.sleep(1 / self.fps)
-    
-    def stop(self):
-        self.running = False
-
-
+        return {"top": top, "left": left, "width": width, "height": height}
