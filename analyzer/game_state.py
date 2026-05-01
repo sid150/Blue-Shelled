@@ -12,6 +12,8 @@ try:
 except ImportError:  # pragma: no cover
     pytesseract = None
 
+from analyzer.mkw_memory import MKWDolphinMemoryReader
+
 
 @dataclass(slots=True)
 class GameState:
@@ -53,6 +55,7 @@ class GameStateAnalyzer:
         hud_roi_place: tuple[float, float, float, float] = (0.70, 0.88, 0.02, 0.22),
         hud_roi_lap: tuple[float, float, float, float] = (0.77, 0.94, 0.77, 0.98),
         hud_roi_item: tuple[float, float, float, float] = (0.03, 0.20, 0.73, 0.96),
+        memory_reader: MKWDolphinMemoryReader | None = None,
     ) -> None:
         self.history_size = max(2, history_size)
         self.ocr_enabled = ocr_enabled
@@ -64,6 +67,7 @@ class GameStateAnalyzer:
         self._prev_state: GameState | None = None
         self._event_history: list[str] = []
         self._frame_index = 0
+        self._mem_reader = memory_reader
 
     def analyze(self, frame_bgr: np.ndarray) -> GameState:
         self._frame_index += 1
@@ -76,6 +80,8 @@ class GameStateAnalyzer:
         state.hit_by_blue_shell = self._detect_blue_shell(frame_bgr)
         state.race_finished = bool(state.lap == 3 and state.place is not None and state.place <= 3)
 
+        self._overlay_dolphin_memory(state)
+
         if state.fell_off_track:
             self._push_event("fell_off_track")
         if state.hit_by_blue_shell:
@@ -87,6 +93,21 @@ class GameStateAnalyzer:
         state.recent_events = self._event_history.copy()
         self._prev_state = state
         return state
+
+    def _overlay_dolphin_memory(self, state: GameState) -> None:
+        if self._mem_reader is None:
+            return
+        overlay = self._mem_reader.read_overlay()
+        if overlay is None:
+            return
+        if overlay.place is not None:
+            state.place = overlay.place
+        if overlay.lap is not None:
+            state.lap = overlay.lap
+        if overlay.in_race is not None:
+            state.in_race = overlay.in_race
+        if overlay.race_finished is True:
+            state.race_finished = True
 
     def _detect_in_race(self, frame: np.ndarray) -> bool:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
